@@ -77,6 +77,9 @@
 #ifndef FREEINK_DEVICE_WAVESHARE_EPAPER_397
 #define FREEINK_DEVICE_WAVESHARE_EPAPER_397 0
 #endif
+#ifndef FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2
+#define FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 0
+#endif
 #ifndef FREEINK_DEVICE_METALIO_EINK4
 #define FREEINK_DEVICE_METALIO_EINK4 0
 #endif
@@ -98,9 +101,10 @@
       FREEINK_DEVICE_M5 || FREEINK_DEVICE_MURPHY || FREEINK_DEVICE_DELINK || FREEINK_DEVICE_LILYGO ||          \
       FREEINK_DEVICE_M5PAPER || FREEINK_DEVICE_STICKY || FREEINK_DEVICE_PAPERMONO || FREEINK_DEVICE_PAPERS3 || \
       FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_EEGO_A4 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 ||             \
+      FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 ||                                                                 \
       FREEINK_DEVICE_ONEPAGE || FREEINK_DEVICE_METALIO_EINK4 || FREEINK_DEVICE_READPICO || FREEINK_DEVICE_WS397)
 #error \
-    "FreeInk: no device selected. Pass at least one -DFREEINK_DEVICE_<NAME> (X4, X3, X4PRO, X4CLASSIC, M5, MURPHY, DELINK, LILYGO, M5PAPER, STICKY, PAPERMONO, PAPERS3, MURPHY_M4, EEGO_A4, WAVESHARE_EPAPER_397, METALIO_EINK4, ONEPAGE, READPICO, WS397) in your build env — see platformio.sample.ini."
+    "FreeInk: no device selected. Pass at least one -DFREEINK_DEVICE_<NAME> (X4, X3, X4PRO, X4CLASSIC, M5, MURPHY, DELINK, LILYGO, M5PAPER, STICKY, PAPERMONO, PAPERS3, MURPHY_M4, EEGO_A4, WAVESHARE_EPAPER_397, WAVESHARE_EPAPER_397_V2, METALIO_EINK4, ONEPAGE, READPICO, WS397) in your build env — see platformio.sample.ini."
 #endif
 // Each device belongs to one MCU family; a binary targets exactly one. X3/X4 are
 // ESP32-C3; M5 PaperColor/Murphy/de-link/LilyGo are ESP32-S3; M5Paper v1.1 is the
@@ -112,7 +116,7 @@
   (FREEINK_DEVICE_M5 || FREEINK_DEVICE_MURPHY || FREEINK_DEVICE_DELINK || FREEINK_DEVICE_LILYGO ||          \
    FREEINK_DEVICE_STICKY || FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_X4CLASSIC || FREEINK_DEVICE_PAPERMONO || \
    FREEINK_DEVICE_PAPERS3 || FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_EEGO_A4 ||                          \
-   FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_METALIO_EINK4 || FREEINK_DEVICE_READPICO || FREEINK_DEVICE_WS397)
+   FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 || FREEINK_DEVICE_METALIO_EINK4 || FREEINK_DEVICE_READPICO || FREEINK_DEVICE_WS397)
 #define FREEINK_MCU_ESP32 (FREEINK_DEVICE_M5PAPER)
 #if (FREEINK_MCU_C3 + FREEINK_MCU_C61 + FREEINK_MCU_S3 + FREEINK_MCU_ESP32) != 1
 #error \
@@ -128,6 +132,7 @@
 // references — see docs/xteink-x4pro-support.md.
 #if FREEINK_DEVICE_X4 || FREEINK_DEVICE_DELINK || FREEINK_DEVICE_STICKY || FREEINK_DEVICE_X4PRO || \
     FREEINK_DEVICE_X4CLASSIC || FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 || \
+    FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 || \
     FREEINK_DEVICE_ONEPAGE || FREEINK_DEVICE_METALIO_EINK4 || FREEINK_DEVICE_WS397 || FREEINK_DEVICE_PAPERMONO
 #define FREEINK_DRIVER_SSD1677 1
 #else
@@ -333,7 +338,7 @@
 #endif
 #ifndef FREEINK_CAP_AUDIO
 #define FREEINK_CAP_AUDIO \
-  (FREEINK_DEVICE_MURPHY || FREEINK_DEVICE_M5 || FREEINK_DEVICE_WAVESHARE_EPAPER_397)
+  (FREEINK_DEVICE_MURPHY || FREEINK_DEVICE_M5 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2)
 #endif
 // Microphone capture (PDM in). Separate from FREEINK_CAP_AUDIO (output): the
 // Sticky has a PDM mic but no output codec. The Microphone lib compiles its
@@ -347,7 +352,7 @@
 #define FREEINK_CAP_RTC                                                                                        \
   (FREEINK_DEVICE_X3 || FREEINK_DEVICE_STICKY || FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_X4CLASSIC ||           \
    FREEINK_DEVICE_PAPERMONO || FREEINK_DEVICE_PAPERS3 || FREEINK_DEVICE_EEGO_A4 || FREEINK_DEVICE_MURPHY_M4 || \
-   FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_LILYGO || FREEINK_DEVICE_METALIO_EINK4 ||             \
+   FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 || FREEINK_DEVICE_LILYGO || FREEINK_DEVICE_METALIO_EINK4 ||             \
    FREEINK_DEVICE_READPICO || FREEINK_DEVICE_WS397)
 #endif
 #ifndef FREEINK_CAP_TEMP_HUMIDITY
@@ -355,7 +360,7 @@
 #endif
 #ifndef FREEINK_CAP_IMU
 #define FREEINK_CAP_IMU \
-  (FREEINK_DEVICE_X3 || FREEINK_DEVICE_STICKY || FREEINK_DEVICE_X4CLASSIC || FREEINK_DEVICE_READPICO || FREEINK_DEVICE_WS397)
+  (FREEINK_DEVICE_X3 || FREEINK_DEVICE_STICKY || FREEINK_DEVICE_X4CLASSIC || FREEINK_DEVICE_READPICO || FREEINK_DEVICE_WS397 || FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2)
 #endif
 // LEDC PWM buzzer (tone beeper). The Buzzer lib drives the AudioConfig.buzzer
 // pin; on for boards that wire one (Sticky GPIO48, Murphy GPIO46, PaperS3
@@ -401,7 +406,7 @@
 #ifndef FREEINK_SD_SDMMC
 #define FREEINK_SD_SDMMC                                                                                       \
   (FREEINK_DEVICE_DELINK || FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_X4CLASSIC || FREEINK_DEVICE_PAPERMONO ||     \
-   FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_METALIO_EINK4 ||          \
+   FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 || FREEINK_DEVICE_METALIO_EINK4 ||          \
    FREEINK_DEVICE_READPICO || FREEINK_DEVICE_WS397)
 #endif
 
@@ -464,6 +469,7 @@ enum class Board : uint8_t {
              // (16-bit i80 bus, SY7636A rails behind an FCA9555), CST836U touch +
              // 3 capacitive key zones, SC7A20H accelerometer, CW32L010 PMU
   WsEpaper397,  // SDK-managed Waveshare power and ordinary buttons.
+  WaveshareEpaper397V2,
 };
 
 // How the board reports button presses.
@@ -927,6 +933,12 @@ constexpr AudioConfig M5_PAPERCOLOR_AUDIO = {
 
 constexpr AudioConfig WAVESHARE_EPAPER_397_AUDIO = {
     AudioOutput::I2sEs8311Mclk16k, 14, 47, 48, 13, PIN_UNASSIGNED, true, 39, 41, 42, 0x18, PIN_UNASSIGNED, 10};
+
+// V2 music target: same ES8311 wiring, but the codec derives its internal clock
+// from BCLK (ES8311_INIT) instead of a fixed external 16 kHz MCLK, so playback
+// covers 8-48 kHz. The I2S peripheral still outputs the 256x MCLK on GPIO13.
+constexpr AudioConfig WAVESHARE_EPAPER_397_V2_AUDIO = {
+    AudioOutput::I2sEs8311, 14, 47, 48, 13, PIN_UNASSIGNED, true, 39, 41, 42, 0x18, PIN_UNASSIGNED, 10};
 
 // Sticky has no output codec (PDM mic in only) — just the LEDC buzzer on GPIO48,
 // driven by the Buzzer lib. output=None so hasAudio() stays false; the buzzer
@@ -1787,6 +1799,36 @@ constexpr BoardProfile WAVESHARE_EPAPER_397 = {
     1.0f,
     {}};
 
+// --- Waveshare ESP32-S3 ePaper 3.97 — SSD1677 + AXP2101 -------------------
+// The AXP2101 is owned by the consumer HAL. The profile exposes only the
+// direct panel, SDMMC, buttons, and PCF85063A RTC wiring.
+constexpr BoardProfile WAVESHARE_EPAPER_397_V2 = {
+    Board::WaveshareEpaper397V2,
+    "waveshare_epaper_397_v2",
+    InputStyle::DigitalButtons,
+    DisplayController::SSD1677,
+    800,
+    480,
+    {11, 12, 10, 9, 46, 3, PIN_UNASSIGNED},
+    20000000,
+    {PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, false, 0},
+    {0, 5, PIN_UNASSIGNED, PIN_UNASSIGNED, 4,6,1, true},
+    PIN_UNASSIGNED,
+    PIN_UNASSIGNED,
+    1.0f,
+    PIN_UNASSIGNED,
+    NO_TOUCH,
+    NO_FRONTLIGHT,
+    WAVESHARE_EPAPER_397_V2_AUDIO,
+    NO_LEDS,
+    NO_FLIP,
+    {16, 17, 15, 7, 8, 18, 4},
+    NO_GAUGE,
+    NO_MIC,
+    {41, 42, 400000, 0x51, 0, 0x6B, 0, RtcType::Pcf85063, ImuType::Qmi8658},
+    1.0f,
+    {}};
+
 static_assert(!EEGO_A4.touch.swapXY && !EEGO_A4.touch.flipX && !EEGO_A4.touch.flipY,
               "EEGO A4 touch backend returns panel-native coordinates; no raw-range mapping");
 static_assert(MURPHY_M4.displayWidth / 8 * MURPHY_M4.displayHeight == 48000,
@@ -1835,6 +1877,18 @@ static_assert(WAVESHARE_EPAPER_397.audio.output == AudioOutput::I2sEs8311Mclk16k
                   WAVESHARE_EPAPER_397.audio.codecScl == 42 && WAVESHARE_EPAPER_397.audio.codecAddr == 0x18 &&
                   WAVESHARE_EPAPER_397.audio.ampSettleMs == 10,
               "Waveshare 3.97 audio profile must match the ES8311/NS4150B wiring");
+
+// V2 profile guards — stage 1 keeps the copied wiring identical to the old board.
+static_assert(WAVESHARE_EPAPER_397_V2.displayWidth / 8 * WAVESHARE_EPAPER_397_V2.displayHeight == 48000,
+              "Waveshare 3.97 V2 must use one 48,000-byte framebuffer");
+static_assert(WAVESHARE_EPAPER_397_V2.sdmmc.busWidth == 4, "Waveshare 3.97 V2 SD must use 4-bit SDMMC");
+static_assert(WAVESHARE_EPAPER_397_V2.input.confirm == 5, "Waveshare 3.97 V2 GPIO5 must be confirm");
+static_assert(WAVESHARE_EPAPER_397_V2.audio.output == AudioOutput::I2sEs8311 &&
+                  WAVESHARE_EPAPER_397_V2.audio.mclk == 13 && WAVESHARE_EPAPER_397_V2.audio.bclk == 14 &&
+                  WAVESHARE_EPAPER_397_V2.audio.lrclk == 47 && WAVESHARE_EPAPER_397_V2.audio.dout == 48 &&
+                  WAVESHARE_EPAPER_397_V2.audio.ampEnable == 39 &&
+                  WAVESHARE_EPAPER_397_V2.audio.codecAddr == 0x18,
+              "Waveshare 3.97 V2 music audio must be ES8311 (BCLK-clocked, 8-48 kHz) on the same wiring");
 
 // --- Xteink X4 Classic (X4C) — ESP32-S3, 800x480 EPD, no touch/frontlight ---
 // Recovered from the stock X4C image. It shares the X4 Pro display stack while
@@ -2092,7 +2146,8 @@ constexpr uint32_t MAX_FRAMEBUFFER_BYTES_COMPILED_IN = cmax(cmax(cmax(cmax(FREEI
                         cmax(FREEINK_DEVICE_PAPERS3 ? panelBytes(M5PAPER_S3) : 0u,
                              FREEINK_DEVICE_MURPHY_M4 ? panelBytes(MURPHY_M4) : 0u)),
                    cmax(cmax(FREEINK_DEVICE_EEGO_A4 ? panelBytes(EEGO_A4) : 0u,
-                             FREEINK_DEVICE_WAVESHARE_EPAPER_397 ? panelBytes(WAVESHARE_EPAPER_397) : 0u),
+                             cmax(FREEINK_DEVICE_WAVESHARE_EPAPER_397 ? panelBytes(WAVESHARE_EPAPER_397) : 0u,
+                                  FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 ? panelBytes(WAVESHARE_EPAPER_397_V2) : 0u)),
                         cmax(FREEINK_DEVICE_ONEPAGE ? panelBytes(ONEPAGE) : 0u,
                              FREEINK_DEVICE_METALIO_EINK4 ? panelBytes(METALIO_EINK4) : 0u))))),
       FREEINK_DEVICE_WS397 ? panelBytes(WS_EPAPER_397) : 0u);
@@ -2139,6 +2194,8 @@ constexpr BoardProfile DEFAULT_DEVICE = XTEINK_X4_CLASSIC;
 constexpr BoardProfile DEFAULT_DEVICE = EEGO_A4;
 #elif FREEINK_DEVICE_WAVESHARE_EPAPER_397
 constexpr BoardProfile DEFAULT_DEVICE = WAVESHARE_EPAPER_397;
+#elif FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2
+constexpr BoardProfile DEFAULT_DEVICE = WAVESHARE_EPAPER_397_V2;
 #elif FREEINK_DEVICE_READPICO
 constexpr BoardProfile DEFAULT_DEVICE = READ_PICO;
 #elif FREEINK_DEVICE_X3 && !FREEINK_DEVICE_X4
@@ -2236,6 +2293,11 @@ inline bool selectDevice(Board which) {
 #if FREEINK_DEVICE_WAVESHARE_EPAPER_397
     case Board::WaveshareEpaper397:
       ACTIVE = WAVESHARE_EPAPER_397;
+      break;
+#endif
+#if FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2
+    case Board::WaveshareEpaper397V2:
+      ACTIVE = WAVESHARE_EPAPER_397_V2;
       break;
 #endif
 #if FREEINK_DEVICE_METALIO_EINK4

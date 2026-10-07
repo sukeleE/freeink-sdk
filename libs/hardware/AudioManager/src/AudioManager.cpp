@@ -8,6 +8,8 @@
 
 #include <Wire.h>
 #include <driver/i2s_std.h>
+#include <esp_heap_caps.h>
+#include <mp3dec.h>
 
 #include <memory>
 
@@ -18,6 +20,13 @@ namespace {
 constexpr uint32_t CODEC_I2C_HZ = 100000;  // OEM bus speed (shared with touch)
 constexpr size_t READ_CHUNK = 1024;        // mono source bytes per loop pass
 
+// MP3 task buffer sizes. Helix needs ~4 KB of input to cover the largest frame
+// plus its bit-reservoir look-back; output is at most 1152 stereo samples.
+constexpr size_t MP3_IN_CAP = 4096;
+constexpr size_t MP3_OUT_SAMPS = 2304;
+// Consecutive decode failures before giving up on the file (auto-skip).
+constexpr uint8_t MP3_ERROR_BUDGET = 16;
+
 // ES8388 playback init recovered from the Murphy OEM firmware — exact register
 // order matters (staged mute -> clocks/format -> mixers -> power -> unmute).
 struct RegVal {
@@ -26,7 +35,7 @@ struct RegVal {
 constexpr RegVal ES8388_INIT[] = {
     {0x19, 0x04}, {0x01, 0x50}, {0x02, 0x00}, {0x08, 0x00}, {0x04, 0x3e}, {0x00, 0x12},
     {0x17, 0x18}, {0x18, 0x02}, {0x26, 0x1b}, {0x27, 0x90}, {0x2a, 0x90}, {0x2b, 0x80},
-    {0x2d, 0x00}, {0x1b, 0x00}, {0x1a, 0x00}, {0x03, 0xff}, {0x09, 0x88}, {0x0a, 0xf0},
+    {0x2d, 0x00}, {0x1b, 0x00}, {0x1a, 0x00}, {0x03, 0xff}, {0x09, 0x88}, {0x10, 0xf0},
     {0x0b, 0x80}, {0x0c, 0x0e}, {0x0d, 0x02}, {0x10, 0x20}, {0x11, 0x20}, {0x2e, 0x1e},
     {0x2f, 0x1e}, {0x30, 0x1e}, {0x31, 0x1e}, {0x04, 0x3c}, {0x19, 0x00},
 };
@@ -60,6 +69,9 @@ constexpr uint8_t ES8311_VOL_MAX_REG = 0xCF;  // +16 dB, 0.5 dB/step (0xBF = 0 d
 
 uint32_t readLE32(const uint8_t* p) {
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+uint32_t readBE32(const uint8_t* p) {
+  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 uint16_t readLE16(const uint8_t* p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
 
@@ -368,14 +380,16 @@ bool AudioManager::startPlayback(const WavSource& source, const WavInfo& info, b
   // against an idle I2S line is an audible pop.
   codecMute(false);
 
+  kind_ = SourceKind::Wav;
   source_ = source;
   wav_ = info;
   loop_ = loop;
+  positionMs_.store(0, std::memory_order_release);
   playbackState_.store(PlaybackState::Playing, std::memory_order_release);
 
   // Same shape as the OEM "musicTask" (high priority, core 0 — the Arduino
-  // loop owns core 1); 8K stack covers the on-stack sample buffers.
-  if (xTaskCreatePinnedToCore(taskEntry, "audio_play", 8192, this, 10, &task_, 0) != pdPASS) {
+  // loop owns core 1); the stack covers on-task buffers plus SdFat call depth.
+  if (xTaskCreatePinnedToCore(taskEntry, "audio_play", TASK_STACK, this, 10, &task_, 0) != pdPASS) {
     task_ = nullptr;
     playbackState_.store(PlaybackState::Idle, std::memory_order_release);
     return false;
@@ -408,19 +422,72 @@ bool AudioManager::requestRestart() {
   for (;;) {
     if (state == PlaybackState::RestartPending) return true;
     if (state != PlaybackState::Playing) return false;
-    if (playbackState_.compare_exchange_weak(state, PlaybackState::RestartPending, std::memory_order_acq_rel,
+    if (playbackState_.compare_exchange_weak(state, PlaybackState::RestartPending,
+                                             std::memory_order_acq_rel,
                                              std::memory_order_acquire)) {
       return true;
     }
   }
 }
 
+bool AudioManager::pause() {
+  PlaybackState state = playbackState_.load(std::memory_order_acquire);
+  for (;;) {
+    if (state == PlaybackState::Paused) return true;
+    if (state != PlaybackState::Playing) return false;
+    if (playbackState_.compare_exchange_weak(state, PlaybackState::Paused,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire)) {
+      // Mute now; the amp is dropped by the task once it reaches the pause
+      // gate (it may be finishing a blocking I2S write).
+      codecMute(true);
+      return true;
+    }
+  }
+}
+
+bool AudioManager::resume() {
+  PlaybackState state = playbackState_.load(std::memory_order_acquire);
+  for (;;) {
+    if (state == PlaybackState::Playing) return true;
+    if (state != PlaybackState::Paused) return false;
+    if (playbackState_.compare_exchange_weak(state, PlaybackState::Playing,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire)) {
+      codecMute(false);
+      if (task_ != nullptr) xTaskNotifyGive(task_);  // wake the blocked task
+      return true;
+    }
+  }
+}
+
+bool AudioManager::getPlaybackStatus(PlaybackStatus& out) const {
+  const PlaybackState state = playbackState_.load(std::memory_order_acquire);
+  out.active = state != PlaybackState::Idle;
+  out.paused = state == PlaybackState::Paused;
+  out.positionMs = positionMs_.load(std::memory_order_acquire);
+  out.durationMs = 0;
+  if (kind_ == SourceKind::Mp3) {
+    out.durationMs = mp3_.durationMs;
+  } else if (wav_.dataLength > 0 && wav_.sampleRate > 0) {
+    out.durationMs = (uint32_t)((uint64_t)wav_.dataLength * 1000 /
+                                ((uint32_t)wav_.sampleRate * wav_.channels * 2));
+  }
+  return out.active;
+}
+
+bool AudioManager::takeNaturalEnd() { return naturalEnd_.exchange(false); }
+
 void AudioManager::stop() {
   if (!begun_) return;
   PlaybackState state = playbackState_.load(std::memory_order_acquire);
-  while (state == PlaybackState::Playing || state == PlaybackState::RestartPending) {
-    if (playbackState_.compare_exchange_weak(state, PlaybackState::Stopping, std::memory_order_acq_rel,
+  while (state == PlaybackState::Playing || state == PlaybackState::RestartPending ||
+         state == PlaybackState::Paused) {
+    if (playbackState_.compare_exchange_weak(state, PlaybackState::Stopping,
+                                             std::memory_order_acq_rel,
                                              std::memory_order_acquire)) {
+      // A paused task blocks on its notification; wake it so it can finish.
+      if (task_ != nullptr) xTaskNotifyGive(task_);
       break;
     }
   }
@@ -433,7 +500,49 @@ void AudioManager::stop() {
   codecMute(true);
 }
 
-void AudioManager::taskEntry(void* self) { static_cast<AudioManager*>(self)->taskLoop(); }
+void AudioManager::primeLine(void* txRaw, void* silence, size_t bytes) {
+  i2s_chan_handle_t tx = (i2s_chan_handle_t)txRaw;
+  memset(silence, 0, bytes);
+  // Prime the line with silence, then raise the amp: the amp pops loudly
+  // when enabled against an idle or just-started I2S line.
+  for (int i = 0; i < 2; ++i) {
+    size_t written = 0;
+    if (i2s_channel_write(tx, silence, bytes, &written, pdMS_TO_TICKS(200)) != ESP_OK) break;
+  }
+  setAmp(true);
+  if (BoardConfig::ACTIVE.audio.ampSettleMs > 0) {
+    vTaskDelay(pdMS_TO_TICKS(BoardConfig::ACTIVE.audio.ampSettleMs));
+  }
+}
+
+bool AudioManager::waitWhilePaused() {
+  setAmp(false);
+  while (playbackState_.load(std::memory_order_acquire) == PlaybackState::Paused) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  }
+  return playbackState_.load(std::memory_order_acquire) != PlaybackState::Stopping;
+}
+
+void AudioManager::finale(void* txRaw, bool natural) {
+  i2s_chan_handle_t tx = (i2s_chan_handle_t)txRaw;
+  setAmp(false);
+  i2s_channel_disable(tx);
+  chanEnabled_ = false;
+  naturalEnd_.store(natural, std::memory_order_release);
+
+  task_ = nullptr;
+  playbackState_.store(PlaybackState::Idle, std::memory_order_release);
+  vTaskDelete(nullptr);
+}
+
+void AudioManager::taskEntry(void* self) {
+  auto* me = static_cast<AudioManager*>(self);
+  if (me->kind_ == SourceKind::Mp3) {
+    me->mp3TaskLoop();
+  } else {
+    me->taskLoop();
+  }
+}
 
 void AudioManager::taskLoop() {
   i2s_chan_handle_t tx = (i2s_chan_handle_t)txChan_;
@@ -441,23 +550,24 @@ void AudioManager::taskLoop() {
   // Mono is duplicated into both slots, so the out buffer is 2x.
   int16_t outBuf[READ_CHUNK];
 
-  // Prime the line with silence, then raise the amp: the AW8737A pops loudly
-  // when enabled against an idle or just-started I2S line.
-  memset(outBuf, 0, sizeof(outBuf));
-  for (int i = 0; i < 2; ++i) {
-    size_t written = 0;
-    if (i2s_channel_write(tx, outBuf, sizeof(outBuf), &written, pdMS_TO_TICKS(200)) != ESP_OK) break;
-  }
-  setAmp(true);
-  if (BoardConfig::ACTIVE.audio.ampSettleMs > 0) {
-    vTaskDelay(pdMS_TO_TICKS(BoardConfig::ACTIVE.audio.ampSettleMs));
-  }
+  primeLine(tx, outBuf, sizeof(outBuf));
 
   size_t consumed = 0;
   bool draining = false;
+  bool natural = false;
   uint8_t drainBuffers = 0;
   for (;;) {
     PlaybackState state = playbackState_.load(std::memory_order_acquire);
+
+    if (state == PlaybackState::Paused) {
+      if (!waitWhilePaused()) {
+        finale(tx, false);
+        return;
+      }
+      primeLine(tx, outBuf, sizeof(outBuf));
+      continue;
+    }
+
     if (state == PlaybackState::RestartPending) {
       if (!source_.seek || !source_.seek(wav_.dataStart)) {
         log_e("PCM source restart failed");
@@ -467,32 +577,42 @@ void AudioManager::taskLoop() {
         draining = false;
         drainBuffers = 0;
         PlaybackState pending = PlaybackState::RestartPending;
-        playbackState_.compare_exchange_strong(pending, PlaybackState::Playing, std::memory_order_acq_rel,
+        playbackState_.compare_exchange_strong(pending, PlaybackState::Playing,
+                                               std::memory_order_acq_rel,
                                                std::memory_order_acquire);
       }
       continue;
     }
     if (state == PlaybackState::Stopping && !draining) {
       draining = true;
+      natural = false;
       drainBuffers = 0;
     }
 
     if (draining) {
       if (drainBuffers >= 6) {
-        if (state == PlaybackState::Stopping) break;
+        if (state == PlaybackState::Stopping) {
+          finale(tx, natural);
+          return;
+        }
+        // Natural drain finished while still Playing.
         PlaybackState playing = PlaybackState::Playing;
-        if (playbackState_.compare_exchange_strong(playing, PlaybackState::Stopping, std::memory_order_acq_rel,
+        if (playbackState_.compare_exchange_strong(playing, PlaybackState::Stopping,
+                                                   std::memory_order_acq_rel,
                                                    std::memory_order_acquire)) {
-          break;
+          finale(tx, natural);
+          return;
         }
         continue;
       }
       memset(outBuf, 0, sizeof(outBuf));
       size_t written = 0;
       if (i2s_channel_write(tx, outBuf, sizeof(outBuf), &written, pdMS_TO_TICKS(200)) != ESP_OK) {
-        playbackState_.store(PlaybackState::Stopping, std::memory_order_release);
-        break;
+        finale(tx, false);
+        return;
       }
+      // A user stop landing during the natural tail turns it into a user stop.
+      if (playbackState_.load(std::memory_order_acquire) == PlaybackState::Stopping) natural = false;
       ++drainBuffers;
       continue;
     }
@@ -506,6 +626,7 @@ void AudioManager::taskLoop() {
           continue;
         }
         draining = true;
+        natural = true;
         continue;
       }
       if (want > left) want = left;
@@ -514,6 +635,7 @@ void AudioManager::taskLoop() {
     want -= want % frameBytes;
     if (want == 0) {
       draining = true;
+      natural = true;
       continue;
     }
 
@@ -524,14 +646,18 @@ void AudioManager::taskLoop() {
         continue;
       }
       draining = true;
+      natural = true;
       continue;
     }
     if (n > static_cast<int>(want) || static_cast<size_t>(n) % frameBytes != 0) {
       log_e("PCM source returned an invalid byte count");
-      playbackState_.store(PlaybackState::Stopping, std::memory_order_release);
-      break;
+      finale(tx, false);
+      return;
     }
     consumed += n;
+    positionMs_.store((uint32_t)((uint64_t)consumed * 1000 /
+                                 ((uint32_t)wav_.sampleRate * wav_.channels * 2)),
+                      std::memory_order_release);
 
     const int16_t* samples = (const int16_t*)inBuf;
     size_t outBytes;
@@ -549,18 +675,333 @@ void AudioManager::taskLoop() {
 
     size_t written = 0;
     if (i2s_channel_write(tx, outBuf, outBytes, &written, pdMS_TO_TICKS(1000)) != ESP_OK) {
-      playbackState_.store(PlaybackState::Stopping, std::memory_order_release);
+      finale(tx, false);
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MP3
+// ---------------------------------------------------------------------------
+
+bool AudioManager::analyzeMp3(const Mp3Source& source, Mp3Info& info) {
+  if (!source.read || !source.seek || !source.size) return false;
+  if (!source.seek(0)) return false;
+
+  uint8_t hdr[10];
+  if (source.read(hdr, sizeof(hdr)) != (int)sizeof(hdr)) return false;
+
+  size_t start = 0;
+  if (memcmp(hdr, "ID3", 3) == 0) {
+    // ID3v2.2+: the size at offset 6 is four syncsafe bytes (7 bits each).
+    const uint32_t tagSize = ((uint32_t)(hdr[6] & 0x7f) << 21) |
+                             ((uint32_t)(hdr[7] & 0x7f) << 14) |
+                             ((uint32_t)(hdr[8] & 0x7f) << 7) | (uint32_t)(hdr[9] & 0x7f);
+    start = 10 + tagSize;
+    if (hdr[5] & 0x10) start += 10;  // footer flag
+    if (!source.seek(start)) return false;
+  }
+
+  uint8_t probe[8192];
+  const int got = source.read(probe, sizeof(probe));
+  if (got < 4) return false;
+
+  const int syncOff = MP3FindSyncWord(probe, got);
+  if (syncOff < 0) {
+    log_e("mp3: no frame sync");
+    return false;
+  }
+  start += syncOff;
+
+  HMP3Decoder probeDec = MP3InitDecoder();
+  if (probeDec == nullptr) return false;
+
+  MP3FrameInfo fi;
+  if (MP3GetNextFrameInfo(probeDec, &fi, probe + syncOff) != ERR_MP3_NONE) {
+    log_e("mp3: invalid first frame (free bitrate?)");
+    MP3FreeDecoder(probeDec);
+    return false;
+  }
+  MP3FreeDecoder(probeDec);
+
+  if (fi.samprate <= 0 || (fi.nChans != 1 && fi.nChans != 2) || fi.bitrate <= 0) {
+    log_e("mp3: unusable frame params");
+    return false;
+  }
+
+  // Duration. Prefer the Xing/Info table in the first frame, then VBRI,
+  // otherwise estimate from the average bitrate and audio payload size.
+  const bool mpeg1 = fi.version == MPEG1;
+  const uint16_t spf = mpeg1 ? 1152 : 576;
+  uint32_t numFrames = 0;
+  bool haveFrames = false;
+
+  const int xingOff = mpeg1 ? (fi.nChans == 1 ? 21 : 36) : (fi.nChans == 1 ? 13 : 21);
+  if (syncOff + xingOff + 8 <= (size_t)got) {
+    const uint8_t* p = probe + syncOff + xingOff;
+    if (memcmp(p, "Xing", 4) == 0 || memcmp(p, "Info", 4) == 0) {
+      const uint32_t flags = readBE32(p + 4);
+      if (flags & 0x00000001) {  // number-of-frames field present
+        numFrames = readBE32(p + 8);
+        haveFrames = numFrames > 0;
+      }
+    }
+  }
+  // VBRI sits at a fixed 36-byte offset from the frame start.
+  if (!haveFrames && syncOff + 36 + 18 <= (size_t)got) {
+    const uint8_t* p = probe + syncOff + 36;
+    if (memcmp(p, "VBRI", 4) == 0) {
+      numFrames = readBE32(p + 14);  // total frames
+      haveFrames = numFrames > 0;
+    }
+  }
+
+  uint32_t durationMs;
+  if (haveFrames) {
+    durationMs = (uint32_t)((uint64_t)numFrames * spf * 1000 / fi.samprate);
+  } else {
+    const uint64_t total = source.size();
+    const uint64_t audioBytes = total > start ? total - start : 0;
+    durationMs = (uint32_t)(audioBytes * 8000ULL / fi.bitrate);
+    log_i("mp3: no Xing/VBRI, duration estimated from bitrate");
+  }
+
+  info.audioStart = start;
+  info.sampleRate = fi.samprate;
+  info.channels = fi.nChans;
+  info.samplesPerFrame = spf;
+  info.durationMs = durationMs;
+  return true;
+}
+
+bool AudioManager::playMp3(const Mp3Source& source) {
+  if (!begun_ && !begin()) return false;
+  stop();
+
+  Mp3Info info;
+  if (!analyzeMp3(source, info)) {
+    log_e("unsupported MP3");
+    return false;
+  }
+  if (!source.seek(info.audioStart)) return false;
+  if (!ensureI2s(info.sampleRate)) {
+    log_e("i2s setup failed");
+    return false;
+  }
+  return startMp3Playback(source, info);
+}
+
+bool AudioManager::startMp3Playback(const Mp3Source& source, const Mp3Info& info) {
+  codecMute(false);
+
+  kind_ = SourceKind::Mp3;
+  mp3Source_ = source;
+  mp3_ = info;
+  positionMs_.store(0, std::memory_order_release);
+  playbackState_.store(PlaybackState::Playing, std::memory_order_release);
+
+  HMP3Decoder dec = MP3InitDecoder();
+  if (dec == nullptr) {
+    playbackState_.store(PlaybackState::Idle, std::memory_order_release);
+    return false;
+  }
+  mp3Decoder_ = dec;
+
+  if (xTaskCreatePinnedToCore(taskEntry, "audio_play", TASK_STACK, this, 10, &task_, 0) != pdPASS) {
+    MP3FreeDecoder(dec);
+    mp3Decoder_ = nullptr;
+    task_ = nullptr;
+    playbackState_.store(PlaybackState::Idle, std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
+void AudioManager::mp3TaskLoop() {
+  i2s_chan_handle_t tx = (i2s_chan_handle_t)txChan_;
+
+  // All big buffers off the task stack — Helix plus SdFat already need depth.
+  // Internal RAM first; fall back to PSRAM (slower reads, logged).
+  uint8_t* in = (uint8_t*)heap_caps_malloc(MP3_IN_CAP, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (in == nullptr) {
+    in = (uint8_t*)heap_caps_malloc(MP3_IN_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (in != nullptr) log_w("mp3 input buffer located in PSRAM");
+  }
+  int16_t* out = (int16_t*)heap_caps_malloc(MP3_OUT_SAMPS * sizeof(int16_t),
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (out == nullptr) {
+    out = (int16_t*)heap_caps_malloc(MP3_OUT_SAMPS * sizeof(int16_t),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out != nullptr) log_w("mp3 output buffer located in PSRAM");
+  }
+  if (in == nullptr || out == nullptr) {
+    log_e("mp3 task buffer allocation failed");
+    if (in != nullptr) heap_caps_free(in);
+    if (out != nullptr) heap_caps_free(out);
+    HMP3Decoder dec = (HMP3Decoder)mp3Decoder_;
+    if (dec != nullptr) MP3FreeDecoder(dec);
+    mp3Decoder_ = nullptr;
+    finale(tx, true);  // nothing to play — let the engine advance
+    return;
+  }
+
+  primeLine(tx, out, MP3_OUT_SAMPS * sizeof(int16_t));
+
+  HMP3Decoder dec = (HMP3Decoder)mp3Decoder_;
+  size_t inLen = 0;
+  bool sourceEof = false;
+  uint8_t errorCount = 0;
+  uint8_t frameLog = 0;
+  uint32_t posMs = 0;
+
+  bool draining = false;
+  bool natural = false;
+  uint8_t drainBuffers = 0;
+
+  for (;;) {
+    PlaybackState state = playbackState_.load(std::memory_order_acquire);
+
+    if (state == PlaybackState::Paused) {
+      if (!waitWhilePaused()) {
+        heap_caps_free(in);
+        heap_caps_free(out);
+        MP3FreeDecoder(dec);
+        mp3Decoder_ = nullptr;
+        finale(tx, false);
+        return;
+      }
+      primeLine(tx, out, MP3_OUT_SAMPS * sizeof(int16_t));
+      continue;
+    }
+    if (state == PlaybackState::Stopping && !draining) {
+      draining = true;
+      natural = false;
+      drainBuffers = 0;
+    }
+
+    if (draining) {
+      if (drainBuffers >= 6) {
+        if (state == PlaybackState::Stopping) {
+          natural = false;
+          break;
+        }
+        PlaybackState playing = PlaybackState::Playing;
+        if (playbackState_.compare_exchange_strong(playing, PlaybackState::Stopping,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_acquire)) {
+          natural = true;
+          break;
+        }
+        continue;
+      }
+      memset(out, 0, MP3_OUT_SAMPS * sizeof(int16_t));
+      size_t written = 0;
+      if (i2s_channel_write(tx, out, MP3_OUT_SAMPS * sizeof(int16_t), &written,
+                            pdMS_TO_TICKS(200)) != ESP_OK) {
+        natural = false;
+        break;
+      }
+      if (playbackState_.load(std::memory_order_acquire) == PlaybackState::Stopping) natural = false;
+      ++drainBuffers;
+      continue;
+    }
+
+    // Top up the input window (remaining bytes are always compacted to front).
+    if (!sourceEof && inLen < MP3_IN_CAP) {
+      const int rd = mp3Source_.read(in + inLen, MP3_IN_CAP - inLen);
+      if (rd <= 0) {
+        sourceEof = true;
+      } else {
+        inLen += rd;
+      }
+    }
+
+    if (inLen == 0) {
+      if (sourceEof) {
+        draining = true;
+        natural = true;
+      }
+      continue;
+    }
+
+    unsigned char* p = in;
+    int bytesLeft = (int)inLen;
+    const int rc = MP3Decode(dec, &p, &bytesLeft, out, 0);
+
+    const int consumed = (int)inLen - bytesLeft;
+    if (bytesLeft > 0) memmove(in, p, bytesLeft);
+    inLen = bytesLeft;
+
+    if (rc == ERR_MP3_MAINDATA_UNDERFLOW) {
+      // Bit reservoir needs bytes from later in the stream: refill and retry.
+      // Not counted as an error.
+      if (sourceEof) {
+        draining = true;
+        natural = true;
+      }
+      continue;
+    }
+    if (rc == ERR_MP3_INDATA_UNDERFLOW) {
+      if (sourceEof && inLen == 0) {
+        draining = true;
+        natural = true;
+      }
+      continue;
+    }
+    if (rc != ERR_MP3_NONE) {
+      if (errorCount < 4) log_w("mp3 decode error %d — resyncing", rc);
+      ++errorCount;
+      if (errorCount >= MP3_ERROR_BUDGET) {
+        log_e("mp3: too many decode errors, ending track");
+        draining = true;
+        natural = true;
+        continue;
+      }
+      const int syncOff = MP3FindSyncWord(in, (int)inLen);
+      if (syncOff > 0) {
+        memmove(in, in + syncOff, inLen - syncOff);
+        inLen -= syncOff;
+      } else if (syncOff < 0) {
+        inLen = 0;
+      }
+      continue;
+    }
+
+    errorCount = 0;
+    MP3FrameInfo fi;
+    MP3GetLastFrameInfo(dec, &fi);
+    if (frameLog < 3) {
+      log_i("mp3 frame: %lu Hz, %d ch, %d bps, %d samps", (unsigned long)fi.samprate, fi.nChans,
+            fi.bitrate, fi.outputSamps);
+      ++frameLog;
+    }
+
+    posMs += (uint32_t)((uint64_t)mp3_.samplesPerFrame * 1000 / fi.samprate);
+    positionMs_.store(posMs, std::memory_order_release);
+
+    size_t outBytes = (size_t)fi.outputSamps * sizeof(int16_t);
+    if (fi.nChans == 1) {
+      // Expand mono to stereo in place, backwards so samples aren't clobbered.
+      for (int i = fi.outputSamps - 1; i >= 0; --i) {
+        out[i * 2] = out[i];
+        out[i * 2 + 1] = out[i];
+      }
+      outBytes = (size_t)fi.outputSamps * 2 * sizeof(int16_t);
+    }
+
+    size_t written = 0;
+    if (i2s_channel_write(tx, out, outBytes, &written, pdMS_TO_TICKS(1000)) != ESP_OK) {
+      natural = false;
       break;
     }
   }
 
-  setAmp(false);
-  i2s_channel_disable(tx);
-  chanEnabled_ = false;
-
-  task_ = nullptr;
-  playbackState_.store(PlaybackState::Idle, std::memory_order_release);
-  vTaskDelete(nullptr);
+  heap_caps_free(in);
+  heap_caps_free(out);
+  MP3FreeDecoder(dec);
+  mp3Decoder_ = nullptr;
+  finale(tx, natural);
 }
 
 }  // namespace freeink
@@ -573,12 +1014,19 @@ bool AudioManager::begin() { return false; }
 void AudioManager::setVolume(uint8_t) {}
 bool AudioManager::play(const WavSource&, bool) { return false; }
 bool AudioManager::playPcm(const PcmSource&, uint32_t, uint8_t) { return false; }
+bool AudioManager::playMp3(const Mp3Source&) { return false; }
 bool AudioManager::playBuffer(const uint8_t*, size_t, bool) { return false; }
 bool AudioManager::requestRestart() { return false; }
+bool AudioManager::pause() { return false; }
+bool AudioManager::resume() { return false; }
+bool AudioManager::getPlaybackStatus(PlaybackStatus&) const { return false; }
+bool AudioManager::takeNaturalEnd() { return false; }
 void AudioManager::stop() {}
 void AudioManager::powerDown() {}
 bool AudioManager::parseWavHeader(const WavSource&, WavInfo&) { return false; }
+bool AudioManager::analyzeMp3(const Mp3Source&, Mp3Info&) { return false; }
 bool AudioManager::startPlayback(const WavSource&, const WavInfo&, bool) { return false; }
+bool AudioManager::startMp3Playback(const Mp3Source&, const Mp3Info&) { return false; }
 bool AudioManager::ensureI2s(uint32_t) { return false; }
 void AudioManager::teardownI2s() {}
 bool AudioManager::codecInit() { return false; }
@@ -586,8 +1034,12 @@ bool AudioManager::codecWrite(uint8_t, uint8_t) { return false; }
 void AudioManager::codecMute(bool) {}
 void AudioManager::setAmp(bool) {}
 void AudioManager::rollbackBegin() {}
+void AudioManager::primeLine(void*, void*, size_t) {}
+bool AudioManager::waitWhilePaused() { return false; }
+void AudioManager::finale(void*, bool) {}
 void AudioManager::taskEntry(void*) {}
 void AudioManager::taskLoop() {}
+void AudioManager::mp3TaskLoop() {}
 }  // namespace freeink
 
 #endif  // FREEINK_CAP_AUDIO

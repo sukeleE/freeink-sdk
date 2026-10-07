@@ -62,7 +62,14 @@ bool SDCardManager::begin() {
     cachedUsedBytesValid = false;
     return false;
   }
-  if (!_vol.begin(_dev)) {
+#if FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2
+  // This card's first partition is a tiny 10 MiB factory volume; the v2 data
+  // lives on partition 3 (237 GB exFAT, migrated from the old root).
+  constexpr uint8_t rootPartition = 3;
+#else
+  constexpr uint8_t rootPartition = 1;
+#endif
+  if (!_vol.begin(_dev, true, rootPartition)) {
     if (Serial) Serial.printf("[%lu] [SD] SDMMC volume mount failed\n", millis());
     initialized = false;
     cachedTotalBytes = 0;

@@ -22,7 +22,8 @@
 
 #if FREEINK_DRIVER_SSD1677
 #include "driver/Ssd1677Driver.h"
-#if FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_METALIO_EINK4
+#if FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 || \
+    FREEINK_DEVICE_METALIO_EINK4
 #include "driver/CrossMuxSsd1677Driver.h"
 #endif
 #endif
@@ -194,7 +195,7 @@ void FreeInkDisplay::selectDriver() {
         esp_rom_printf("Paper Mono combined AA: PSRAM allocation failed; SSD1677 fallback\n");
         _driver = &ssd1677Driver();
       }
-#elif FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_METALIO_EINK4
+#elif FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 || FREEINK_DEVICE_METALIO_EINK4
       _driver = &crossmuxSsd1677Driver();
 #else
       _driver = &ssd1677Driver();

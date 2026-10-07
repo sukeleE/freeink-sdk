@@ -1,6 +1,7 @@
 #include <BoardConfig.h>
 
-#if FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_METALIO_EINK4
+#if FREEINK_DEVICE_MURPHY_M4 || FREEINK_DEVICE_WAVESHARE_EPAPER_397 || FREEINK_DEVICE_WAVESHARE_EPAPER_397_V2 || \
+    FREEINK_DEVICE_METALIO_EINK4
 #include "CrossMuxSsd1677Driver.h"
 
 #include <BoardConfig.h>
@@ -973,6 +974,7 @@ static const CrossMuxSsd1677Config& crossmuxSsd1677ActiveConfig() {
     case BoardConfig::Board::Sticky:
       return crossmuxSsd1677StickyConfig();
     case BoardConfig::Board::WaveshareEpaper397:
+    case BoardConfig::Board::WaveshareEpaper397V2:
       return crossmuxSsd1677Waveshare397Config();
     case BoardConfig::Board::MetalioEink4:
       return crossmuxSsd1677MetalioConfig();
